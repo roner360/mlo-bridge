@@ -109,3 +109,15 @@ def build_html_timeline(df):
     """
 
     return html
+
+# UI
+st.title("MLO → Timeline (Coda Style REAL)")
+
+file = st.file_uploader("Upload XML")
+
+if file:
+    df = parse_mlo(file)
+
+    html = build_html_timeline(df)
+
+    st.components.v1.html(html, height=650)
