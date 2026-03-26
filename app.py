@@ -2,144 +2,125 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 from datetime import datetime, timedelta
-import json
 
 # =========================
-# 1. PARSER ROBUSTO
+# 1. PARSER XML -> MERMAID
 # =========================
-def parse_mlo_safe(xml_file):
+def parse_mlo_to_mermaid(xml_file):
     try:
         tree = ET.parse(xml_file)
         root = tree.getroot()
     except Exception as e:
         st.error(f"Errore XML: {e}")
-        return []
+        return ""
 
-    raw_tasks = []
-    # Usiamo un contatore semplice per gli ID
+    tasks = []
+    node_to_id = {}
     counter = 1
 
-    def walk(node, parent_id=None):
+    # Primo passaggio: Mappatura ID sicuri
+    def map_ids(node):
         nonlocal counter
-        
-        current_id = str(counter)
+        task_id = f"task_{counter}"
+        node_to_id[node] = task_id
         counter += 1
+        for child in node.findall("TaskNode"):
+            map_ids(child)
+
+    # Secondo passaggio: Estrazione dati
+    def walk(node, parent_id=None):
+        caption = node.get("Caption", "").replace(":", "-").strip() or "Senza Titolo"
+        current_id = node_to_id[node]
         
-        caption = node.get("Caption", "").strip() or f"Task {current_id}"
         start_val = node.findtext("StartDateTime")
         due_val = node.findtext("DueDateTime")
 
-        # Conversione date
         s_dt = pd.to_datetime(start_val, errors='coerce')
         e_dt = pd.to_datetime(due_val, errors='coerce')
-        
-        # Fallback date: se mancano, mettiamo oggi. 
-        # Importante: il genitore deve finire dopo i figli.
-        if pd.isna(s_dt): s_dt = datetime.now().replace(hour=9, minute=0)
-        if pd.isna(e_dt): e_dt = s_dt + timedelta(hours=8)
-        if s_dt >= e_dt: e_dt = s_dt + timedelta(hours=1)
 
-        raw_tasks.append({
+        # Fallback date per Mermaid (YYYY-MM-DD)
+        if pd.isna(s_dt): s_dt = datetime.now()
+        if pd.isna(e_dt): e_dt = s_dt + timedelta(days=1)
+        
+        # Calcoliamo la durata in giorni (Mermaid preferisce la durata)
+        duration_days = max(1, (e_dt - s_dt).days)
+
+        # Trova i figli per le dipendenze
+        children = node.findall("TaskNode")
+        child_ids = [node_to_id[c] for c in children]
+
+        tasks.append({
             "id": current_id,
             "name": caption,
-            "start": s_dt,
-            "end": e_dt,
-            "progress": 0,
-            "parent_internal": parent_id, # Usato per costruire le dipendenze
-            "dependencies": []
+            "start": s_dt.strftime("%Y-%m-%d"),
+            "duration": f"{duration_days}d",
+            "dependencies": child_ids, # Il genitore dipende dai figli
+            "is_parent": len(children) > 0
         })
 
-        for child in node.findall("TaskNode"):
+        for child in children:
             walk(child, current_id)
 
-    # Trova il punto di inizio
     task_tree = root.find(".//TaskTree")
     if task_tree is not None:
         for node in task_tree.findall("TaskNode"):
+            map_ids(node)
             walk(node)
 
-    if not raw_tasks:
-        return []
+    # Costruzione della stringa Mermaid
+    mermaid_code = "gantt\n"
+    mermaid_code += "    title MLO Gantt (Child -> Parent)\n"
+    mermaid_code += "    dateFormat  YYYY-MM-DD\n"
+    mermaid_code += "    axisFormat  %d/%m\n\n"
 
-    # LOGICA DIPENDENZE: Il Genitore dipende dai Figli
-    # Creiamo un dizionario per accesso rapido
-    task_dict = {t["id"]: t for t in raw_tasks}
-    
-    for t in raw_tasks:
-        if t["parent_internal"]:
-            parent = task_dict.get(t["parent_internal"])
-            if parent:
-                # Il genitore (parent) ha come dipendenza il figlio (t)
-                parent["dependencies"].append(t["id"])
-                
-                # CORREZIONE DATE: Il genitore deve iniziare dopo che il figlio finisce
-                if parent["start"] <= t["end"]:
-                    parent["start"] = t["end"] + timedelta(hours=1)
-                    if parent["end"] <= parent["start"]:
-                        parent["end"] = parent["start"] + timedelta(hours=8)
+    for t in tasks:
+        # Se ha dipendenze (figli), usiamo 'after'
+        if t["dependencies"]:
+            dep_str = "after " + " ".join(t["dependencies"])
+            mermaid_code += f"    {t['name']} :{t['id']}, {dep_str}, {t['duration']}\n"
+        else:
+            # Task semplice senza dipendenze
+            mermaid_code += f"    {t['name']} :{t['id']}, {t['start']}, {t['duration']}\n"
 
-    # Formattazione finale per Frappe Gantt
-    final_tasks = []
-    for t in raw_tasks:
-        final_tasks.append({
-            "id": t["id"],
-            "name": t["name"],
-            "start": t["start"].strftime("%Y-%m-%d"),
-            "end": t["end"].strftime("%Y-%m-%d"),
-            "progress": t["progress"],
-            "dependencies": ", ".join(t["dependencies"]) # Trasforma lista in stringa "1, 2, 3"
-        })
-
-    return final_tasks
+    return mermaid_code
 
 # =========================
-# 2. HTML & JS
+# 2. HTML RENDERER
 # =========================
-def get_gantt_html(tasks):
-    tasks_json = json.dumps(tasks)
+def render_mermaid(code):
     return f"""
-    <div id="gantt-holder" style="background: white; border: 1px solid #eee; border-radius: 10px;">
-        <svg id="gantt-target"></svg>
+    <div class="mermaid" style="background: white; padding: 20px; border-radius: 10px;">
+        {code}
     </div>
-    <script src="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.min.js"></script>
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.css">
-    <script>
-        document.addEventListener("DOMContentLoaded", function() {{
-            try {{
-                const data = {tasks_json};
-                if(data.length > 0) {{
-                    const gantt = new Gantt("#gantt-target", data, {{
-                        view_mode: 'Day',
-                        language: 'it',
-                        bar_height: 25,
-                        column_width: 40
-                    }});
-                }}
-            }} catch(e) {{
-                console.error("Gantt Error:", e);
-                document.getElementById('gantt-holder').innerHTML = '<p style="padding:20px; color:red;">Errore JS: ' + e.message + '</p>';
+    <script type="module">
+        import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@10/dist/mermaid.esm.min.mjs';
+        mermaid.initialize({{ 
+            startOnLoad: true,
+            theme: 'default',
+            gantt: {{
+                barHeight: 30,
+                fontSize: 12,
+                useMaxWidth: false
             }}
         }});
     </script>
     """
 
 # =========================
-# 3. STREAMLIT INTERFACE
+# 3. STREAMLIT UI
 # =========================
-st.set_page_config(layout="wide", page_title="MLO Gantt")
-st.title("📊 MLO Gantt: Genitore come Successore")
+st.set_page_config(layout="wide")
+st.title("🚀 MLO Gantt con Mermaid.js")
 
-uploaded = st.file_uploader("Trascina qui il file XML di MLO", type="xml")
+uploaded = st.file_uploader("Carica file XML MLO", type="xml")
 
 if uploaded:
-    data = parse_mlo_safe(uploaded)
+    mermaid_string = parse_mlo_to_mermaid(uploaded)
     
-    if data:
-        st.success(f"Analizzati {len(data)} task correttamente.")
-        html = get_gantt_html(data)
-        st.components.v1.html(html, height=600, scrolling=True)
+    if mermaid_string:
+        with st.expander("Vedi Codice Mermaid (Debug)"):
+            st.code(mermaid_string)
         
-        with st.expander("Ispeziona JSON inviato al grafico"):
-            st.json(data)
+        st.components.v1.html(render_mermaid(mermaid_string), height=800, scrolling=True)
     else:
-        st.error("Nessun task trovato. Verifica la struttura dell'XML.")
+        st.error("Impossibile generare il grafico. Controlla il file XML.")
