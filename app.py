@@ -2,7 +2,7 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 from datetime import datetime, timedelta
-from streamlit_vis_timeline import st_timeline
+import json
 
 
 def parse_mlo(xml_file):
@@ -16,11 +16,9 @@ def parse_mlo(xml_file):
         nonlocal id_counter
 
         caption = node.get("Caption", "").strip()
-
         start = node.findtext("StartDateTime")
         due = node.findtext("DueDateTime")
 
-        # ID fallback
         task_id = node.findtext("IDD") or f"auto_{id_counter}"
         id_counter += 1
 
@@ -41,7 +39,6 @@ def parse_mlo(xml_file):
 
     df = pd.DataFrame(tasks)
 
-    # parse date
     df["start"] = pd.to_datetime(df["start"], errors="coerce")
     df["end"] = pd.to_datetime(df["end"], errors="coerce")
 
@@ -53,7 +50,7 @@ def parse_mlo(xml_file):
     return df
 
 
-def to_timeline_format(df):
+def build_html_timeline(df):
     items = []
 
     for _, row in df.iterrows():
@@ -61,21 +58,55 @@ def to_timeline_format(df):
             "id": row["id"],
             "content": row["content"],
             "start": row["start"].isoformat(),
-            "end": row["end"].isoformat(),
-            "group": row["parent"] if row["parent"] else "root"
+            "end": row["end"].isoformat()
         })
 
-    return items
+    items_json = json.dumps(items)
+
+    html = f"""
+    <html>
+    <head>
+      <script src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
+      <link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet" />
+    </head>
+    <body>
+      <div id="timeline"></div>
+
+      <script>
+        var container = document.getElementById('timeline');
+        var items = new vis.DataSet({items_json});
+
+        var options = {{
+          stack: true,
+          zoomable: true,
+          moveable: true,
+          orientation: 'top'
+        }};
+
+        var timeline = new vis.Timeline(container, items, options);
+      </script>
+
+      <style>
+        #timeline {{
+          height: 600px;
+          border: 1px solid lightgray;
+        }}
+      </style>
+    </body>
+    </html>
+    """
+
+    return html
 
 
 # UI
-st.title("MLO → Timeline (Coda Style)")
+st.title("MLO → Timeline (Coda Style REAL)")
 
 file = st.file_uploader("Upload XML")
 
 if file:
     df = parse_mlo(file)
 
-    items = to_timeline_format(df)
+    html = build_html_timeline(df)
 
-    st_timeline(items, height="600px")
+    st.components.v1.html(html, height=650)
