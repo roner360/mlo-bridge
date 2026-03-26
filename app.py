@@ -51,12 +51,14 @@ def parse_mlo(xml_file):
 
 
 def build_html_timeline(df):
+    import json
+
     items = []
 
     for _, row in df.iterrows():
         items.append({
-            "id": row["id"],
-            "content": row["content"],
+            "id": str(row["id"]),
+            "content": str(row["content"]),
             "start": row["start"].isoformat(),
             "end": row["end"].isoformat()
         })
@@ -64,49 +66,46 @@ def build_html_timeline(df):
     items_json = json.dumps(items)
 
     html = f"""
+    <!DOCTYPE html>
     <html>
     <head>
-      <script src="https://unpkg.com/vis-timeline@latest/standalone/umd/vis-timeline-graph2d.min.js"></script>
-      <link href="https://unpkg.com/vis-timeline@latest/styles/vis-timeline-graph2d.min.css" rel="stylesheet" />
+        <meta charset="utf-8" />
+        <script src="https://unpkg.com/vis-timeline@7.7.0/standalone/umd/vis-timeline-graph2d.min.js"></script>
+        <link href="https://unpkg.com/vis-timeline@7.7.0/styles/vis-timeline-graph2d.min.css" rel="stylesheet" />
     </head>
+
     <body>
-      <div id="timeline"></div>
+        <div id="timeline"></div>
 
-      <script>
-        var container = document.getElementById('timeline');
-        var items = new vis.DataSet({items_json});
+        <script>
+            const items = new vis.DataSet({items_json});
 
-        var options = {{
-          stack: true,
-          zoomable: true,
-          moveable: true,
-          orientation: 'top'
-        }};
+            const container = document.getElementById('timeline');
 
-        var timeline = new vis.Timeline(container, items, options);
-      </script>
+            const options = {{
+                stack: true,
+                zoomable: true,
+                moveable: true,
+                orientation: 'top'
+            }};
 
-      <style>
-        #timeline {{
-          height: 600px;
-          border: 1px solid lightgray;
-        }}
-      </style>
+            new vis.Timeline(container, items, options);
+        </script>
+
+        <style>
+            body {{
+                margin: 0;
+                padding: 0;
+                background: white;
+            }}
+
+            #timeline {{
+                height: 600px;
+                border: 1px solid #ccc;
+            }}
+        </style>
     </body>
     </html>
     """
 
     return html
-
-
-# UI
-st.title("MLO → Timeline (Coda Style REAL)")
-
-file = st.file_uploader("Upload XML")
-
-if file:
-    df = parse_mlo(file)
-
-    html = build_html_timeline(df)
-
-    st.components.v1.html(html, height=650)
