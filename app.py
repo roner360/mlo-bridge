@@ -5,116 +5,144 @@ from datetime import datetime, timedelta
 import json
 
 # =========================
-# 1. PARSE XML MLO (PIÙ ROBUSTO)
+# 1. PARSE XML MLO (ID GENERATI)
 # =========================
-def parse_mlo_robust(xml_file):
+def parse_mlo_to_gantt(xml_file):
     try:
         tree = ET.parse(xml_file)
         root = tree.getroot()
     except Exception as e:
-        st.error(f"Errore nel leggere il file XML: {e}")
+        st.error(f"Errore caricamento XML: {e}")
         return []
 
     tasks = []
-    
-    # MLO mette i task dentro TaskTree -> TaskNode
-    # Cerchiamo ricorsivamente tutti i TaskNode
+    # Usiamo un dizionario per mappare i nodi XML a ID univoci generati al volo
+    node_to_id = {}
+    id_counter = 0
+
+    # Funzione ricorsiva per mappare prima tutti i nodi e creare ID certi
+    def map_nodes(node):
+        nonlocal id_counter
+        id_counter += 1
+        # Cerchiamo l'IDD di MLO, se manca usiamo il contatore
+        idd = node.findtext("IDD")
+        node_to_id[node] = idd if idd else f"T{id_counter}"
+        for child in node.findall("TaskNode"):
+            map_nodes(child)
+
+    # Funzione per estrarre i dati
     def walk(node, parent_id=None):
-        caption = node.get("Caption", "").strip()
+        caption = node.get("Caption", "").strip() or "Task Senza Nome"
+        current_id = node_to_id[node]
         
-        # Estraiamo le date dai tag figli del TaskNode
-        start_node = node.find("StartDateTime")
-        due_node = node.find("DueDateTime")
-        idd_node = node.find("IDD")
+        start_val = node.findtext("StartDateTime")
+        due_val = node.findtext("DueDateTime")
 
-        start_val = start_node.text if start_node is not None else None
-        due_val = due_node.text if due_node is not None else None
-        task_id = idd_node.text if idd_node is not None else f"id_{len(tasks)}"
-
-        # Pulizia date per Pandas
         s_dt = pd.to_datetime(start_val, errors='coerce')
         e_dt = pd.to_datetime(due_val, errors='coerce')
         
-        # Fallback se le date mancano (Frappe Gantt le esige)
+        # Fallback date (Frappe Gantt richiede date valide)
         if pd.isna(s_dt): s_dt = datetime.now()
-        if pd.isna(e_dt): e_dt = s_dt + timedelta(days=1)
-        if s_dt >= e_dt: e_dt = s_dt + timedelta(hours=2)
+        if pd.isna(e_dt): e_dt = s_dt + timedelta(hours=24)
+        if s_dt >= e_dt: e_dt = s_dt + timedelta(hours=1)
 
-        tasks.append({
-            "id": str(task_id),
-            "name": caption if caption else "(Senza Titolo)",
+        task_data = {
+            "id": current_id,
+            "name": caption,
             "start": s_dt.strftime("%Y-%m-%d"),
             "end": e_dt.strftime("%Y-%m-%d"),
             "progress": 0,
-            "dependencies": str(parent_id) if parent_id else "", # Qui la freccia va da genitore a figlio (standard Gantt)
-            "is_parent": False
-        })
+            "dependencies": "", # Gestite dopo
+            "temp_parent": parent_id
+        }
+        tasks.append(task_data)
 
-        # Proseguiamo sui figli
         for child in node.findall("TaskNode"):
-            walk(child, task_id)
+            walk(child, current_id)
 
-    # Avvio ricerca
     task_tree = root.find(".//TaskTree")
     if task_tree is not None:
         for node in task_tree.findall("TaskNode"):
+            map_nodes(node)
             walk(node)
-    
+
+    # LOGICA RICHIESTA: Il Genitore è il SUCCESSORE dei figli (Frecce verso l'alto)
+    # Quindi: Genitore dipende da -> Figlio1, Figlio2...
+    id_list = [t["id"] for t in tasks]
+    for t in tasks:
+        # Cerchiamo tutti i compiti che hanno questo task come genitore
+        children_ids = [c["id"] for c in tasks if c["temp_parent"] == t["id"]]
+        if children_ids:
+            # Il genitore dipende dai suoi figli
+            t["dependencies"] = ", ".join(children_ids)
+
     return tasks
 
 # =========================
-# 2. HTML GANTT
+# 2. RENDERER (FIX JS CRASH)
 # =========================
-def render_gantt(tasks_list):
-    tasks_json = json.dumps(tasks_list)
+def render_gantt(tasks):
+    tasks_json = json.dumps(tasks)
     
     return f"""
-    <div id="gantt-container" style="border:1px solid #ccc; background: white;">
-        <svg id="gantt"></svg>
+    <div id="gantt-container" style="background: white; border: 1px solid #ddd; border-radius: 5px;">
+        <svg id="gantt-canvas"></svg>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.css">
 
     <script>
-        try {{
-            const tasks = {tasks_json};
-            if (tasks.length > 0) {{
-                const gantt = new Gantt("#gantt", tasks, {{
+        document.addEventListener("DOMContentLoaded", function() {{
+            try {{
+                const taskData = {tasks_json};
+                
+                if (taskData.length === 0) {{
+                    document.getElementById('gantt-container').innerHTML = "Nessun task trovato.";
+                    return;
+                }}
+
+                const gantt = new Gantt("#gantt-canvas", taskData, {{
                     view_mode: 'Day',
                     language: 'it',
-                    column_width: 30
+                    bar_height: 30,
+                    padding: 18,
+                    column_width: 30,
+                    custom_popup_html: function(task) {{
+                        return `
+                            <div style="padding: 10px; width: 160px;">
+                                <p style="font-weight: bold; margin:0;">${{task.name}}</p>
+                                <p style="font-size: 11px; color: #666;">ID: ${{task.id}}</p>
+                            </div>
+                        `;
+                    }}
                 }});
-            }} else {{
-                document.getElementById('gantt-container').innerHTML = "Nessun dato da visualizzare.";
+            }} catch (e) {{
+                console.error(e);
+                document.getElementById('gantt-container').innerHTML = "Errore nel rendering: " + e.message;
             }}
-        }} catch (err) {{
-            document.getElementById('gantt-container').innerHTML = "Errore JS: " + err.message;
-        }}
+        }});
     </script>
     """
 
 # =========================
-# 3. UI
+# 3. STREAMLIT APP
 # =========================
 st.set_page_config(layout="wide")
-st.title("Debug MLO Timeline")
+st.title("MLO Gantt Dependency Viewer")
 
-uploaded_file = st.file_uploader("Carica XML", type=["xml"])
+uploaded_file = st.file_uploader("Carica XML MyLifeOrganized", type=["xml"])
 
 if uploaded_file:
-    data = parse_mlo_robust(uploaded_file)
-    
-    if not data:
-        st.warning("⚠️ L'XML è stato letto ma non sono stati trovati task. Controlla che il file non sia vuoto.")
-    else:
-        st.success(f"✅ Trovati {len(data)} task!")
+    with st.spinner("Analisi gerarchia MLO..."):
+        tasks = parse_mlo_to_gantt(uploaded_file)
         
-        # Visualizzazione Gantt
-        st.subheader("Gantt View")
-        html_code = render_gantt(data)
-        st.components.v1.html(html_code, height=500)
-
-        # Tabella di controllo per capire se i dati ci sono
-        st.subheader("Tabella Dati Estratti (Debug)")
-        st.table(pd.DataFrame(data).head(10))
+        if tasks:
+            st.info(f"Visualizzazione di {len(tasks)} task. Le frecce indicano che il genitore segue il completamento dei figli.")
+            html_content = render_gantt(tasks)
+            st.components.v1.html(html_content, height=600, scrolling=True)
+            
+            with st.expander("Debug: Struttura Dati"):
+                st.write(pd.DataFrame(tasks))
+        else:
+            st.warning("Nessun task trovato nell'XML.")
