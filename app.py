@@ -5,139 +5,116 @@ from datetime import datetime, timedelta
 import json
 
 # =========================
-# 1. PARSE XML MLO
+# 1. PARSE XML MLO (PIÙ ROBUSTO)
 # =========================
-def parse_mlo_for_gantt(xml_file):
-    tree = ET.parse(xml_file)
-    root = tree.getroot()
+def parse_mlo_robust(xml_file):
+    try:
+        tree = ET.parse(xml_file)
+        root = tree.getroot()
+    except Exception as e:
+        st.error(f"Errore nel leggere il file XML: {e}")
+        return []
+
     tasks = []
     
-    # Mappa per trovare i figli di ogni genitore
-    parent_to_children = {}
-
+    # MLO mette i task dentro TaskTree -> TaskNode
+    # Cerchiamo ricorsivamente tutti i TaskNode
     def walk(node, parent_id=None):
-        caption = node.get("Caption", "").strip() or "(senza nome)"
-        start = node.findtext("StartDateTime")
-        due = node.findtext("DueDateTime")
-        task_id = node.findtext("IDD") or f"id_{hash(caption)}"
-
-        # Gestione date (Frappe Gantt vuole YYYY-MM-DD)
-        # Se mancano, usiamo oggi
-        s_dt = pd.to_datetime(start, errors='coerce')
-        e_dt = pd.to_datetime(due, errors='coerce')
+        caption = node.get("Caption", "").strip()
         
+        # Estraiamo le date dai tag figli del TaskNode
+        start_node = node.find("StartDateTime")
+        due_node = node.find("DueDateTime")
+        idd_node = node.find("IDD")
+
+        start_val = start_node.text if start_node is not None else None
+        due_val = due_node.text if due_node is not None else None
+        task_id = idd_node.text if idd_node is not None else f"id_{len(tasks)}"
+
+        # Pulizia date per Pandas
+        s_dt = pd.to_datetime(start_val, errors='coerce')
+        e_dt = pd.to_datetime(due_val, errors='coerce')
+        
+        # Fallback se le date mancano (Frappe Gantt le esige)
         if pd.isna(s_dt): s_dt = datetime.now()
         if pd.isna(e_dt): e_dt = s_dt + timedelta(days=1)
-        # Frappe Gantt crasha se start == end, aggiungiamo un piccolo offset
-        if s_dt == e_dt: e_dt = s_dt + timedelta(hours=1)
+        if s_dt >= e_dt: e_dt = s_dt + timedelta(hours=2)
 
         tasks.append({
             "id": str(task_id),
-            "name": caption,
+            "name": caption if caption else "(Senza Titolo)",
             "start": s_dt.strftime("%Y-%m-%d"),
             "end": e_dt.strftime("%Y-%m-%d"),
-            "progress": 50, # Default
-            "dependencies": "", # Riempiremo dopo
+            "progress": 0,
+            "dependencies": str(parent_id) if parent_id else "", # Qui la freccia va da genitore a figlio (standard Gantt)
             "is_parent": False
         })
 
-        if parent_id:
-            if parent_id not in parent_to_children:
-                parent_to_children[parent_id] = []
-            parent_to_children[parent_id].append(str(task_id))
-
+        # Proseguiamo sui figli
         for child in node.findall("TaskNode"):
             walk(child, task_id)
 
+    # Avvio ricerca
     task_tree = root.find(".//TaskTree")
     if task_tree is not None:
         for node in task_tree.findall("TaskNode"):
             walk(node)
-
-    # Logica RICHIESTA: Il Genitore è il successore (dipende dai figli)
-    for t in tasks:
-        tid = t["id"]
-        if tid in parent_to_children:
-            t["dependencies"] = ", ".join(parent_to_children[tid])
-            t["is_parent"] = True
-
+    
     return tasks
 
 # =========================
-# 2. BUILD FRAPPE GANTT HTML
+# 2. HTML GANTT
 # =========================
-def render_frappe_gantt(tasks):
-    tasks_json = json.dumps(tasks)
+def render_gantt(tasks_list):
+    tasks_json = json.dumps(tasks_list)
     
     return f"""
-    <div id="gantt-container" style="overflow: auto; background: white; border-radius: 8px;">
+    <div id="gantt-container" style="border:1px solid #ccc; background: white;">
         <svg id="gantt"></svg>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.min.js"></script>
     <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/frappe-gantt@0.6.1/dist/frappe-gantt.css">
 
-    <style>
-        .gantt .bar-progress {{ fill: #a3a3ff; }}
-        .gantt .bar {{ fill: #5e64ff; }}
-        .gantt .bar-wrapper.parent-task .bar {{ fill: #ffbb00; }}
-        .details-container {{ font-family: sans-serif; }}
-    </style>
-
     <script>
-        document.addEventListener("DOMContentLoaded", function() {{
+        try {{
             const tasks = {tasks_json};
-            
-            const gantt = new Gantt("#gantt", tasks, {{
-                header_height: 50,
-                column_width: 30,
-                step: 24,
-                view_modes: ['Day', 'Week', 'Month'],
-                view_mode: 'Day',
-                language: 'it',
-                custom_popup_html: function(task) {{
-                    return `
-                        <div class="details-container" style="padding:10px; width:200px;">
-                            <h5>${{task.name}}</h5>
-                            <p>Inizio: ${{task.start}}</p>
-                            <p>Fine: ${{task.end}}</p>
-                        </div>
-                    `;
-                }}
-            }});
-
-            // Aggiungiamo una classe CSS ai genitori per colorarli diversamente
-            tasks.forEach(t => {{
-                if(t.is_parent) {{
-                   const el = document.querySelector(`[data-id="${{t.id}}"]`);
-                   if(el) el.classList.add('parent-task');
-                }}
-            }});
-        }});
+            if (tasks.length > 0) {{
+                const gantt = new Gantt("#gantt", tasks, {{
+                    view_mode: 'Day',
+                    language: 'it',
+                    column_width: 30
+                }});
+            }} else {{
+                document.getElementById('gantt-container').innerHTML = "Nessun dato da visualizzare.";
+            }}
+        }} catch (err) {{
+            document.getElementById('gantt-container').innerHTML = "Errore JS: " + err.message;
+        }}
     </script>
     """
 
 # =========================
-# 3. STREAMLIT UI
+# 3. UI
 # =========================
-st.set_page_config(layout="wide", page_title="MLO Frappe Gantt")
+st.set_page_config(layout="wide")
+st.title("Debug MLO Timeline")
 
-st.title("🏗️ MLO Gantt Module (Frappe Engine)")
-st.write("Le frecce sono generate nativamente: dai figli verso il genitore.")
+uploaded_file = st.file_uploader("Carica XML", type=["xml"])
 
-file = st.file_uploader("Carica XML MLO", type=["xml"])
-
-if file:
-    tasks = parse_mlo_for_gantt(file)
+if uploaded_file:
+    data = parse_mlo_robust(uploaded_file)
     
-    if tasks:
-        html_code = render_frappe_gantt(tasks)
-        # Importante: height deve essere sufficiente a contenere il grafico
-        st.components.v1.html(html_code, height=600, scrolling=True)
-        
-        with st.expander("Vedi dati JSON"):
-            st.json(tasks)
+    if not data:
+        st.warning("⚠️ L'XML è stato letto ma non sono stati trovati task. Controlla che il file non sia vuoto.")
     else:
-        st.error("Nessun task trovato nell'XML.")
-else:
-    st.info("Carica un file per iniziare.")
+        st.success(f"✅ Trovati {len(data)} task!")
+        
+        # Visualizzazione Gantt
+        st.subheader("Gantt View")
+        html_code = render_gantt(data)
+        st.components.v1.html(html_code, height=500)
+
+        # Tabella di controllo per capire se i dati ci sono
+        st.subheader("Tabella Dati Estratti (Debug)")
+        st.table(pd.DataFrame(data).head(10))
