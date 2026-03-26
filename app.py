@@ -1,3 +1,13 @@
+import streamlit as st
+import xml.etree.ElementTree as ET
+import pandas as pd
+from datetime import datetime, timedelta
+import plotly.express as px
+
+
+# =========================
+# PARSER MLO
+# =========================
 def parse_mlo(xml_file):
     tree = ET.parse(xml_file)
     root = tree.getroot()
@@ -40,3 +50,55 @@ def parse_mlo(xml_file):
         walk(node)
 
     return pd.DataFrame(tasks)
+
+# =========================
+# GANTT
+# =========================
+def build_gantt(df):
+    today = datetime.today()
+
+    df["start"] = pd.to_datetime(df["start"], errors="coerce")
+    df["end"] = pd.to_datetime(df["due"], errors="coerce")
+
+    # fallback
+    df["start"] = df["start"].fillna(today)
+    df["end"] = df["end"].fillna(df["start"] + timedelta(days=1))
+
+    # ORDINAMENTO → fondamentale
+    df = df.sort_values(by="start")
+
+    fig = px.timeline(
+        df,
+        x_start="start",
+        x_end="end",
+        y="name"
+    )
+
+    fig.update_yaxes(autorange="reversed")
+
+    # miglior visibilità
+    fig.update_layout(
+        height=1200,  # importante
+        showlegend=False
+    )
+
+    return fig
+
+
+# =========================
+# UI STREAMLIT
+# =========================
+st.set_page_config(layout="wide")
+st.title("MLO → Gantt Viewer (MVP)")
+
+uploaded_file = st.file_uploader("Carica file XML MLO", type=["xml"])
+
+if uploaded_file:
+    df = parse_mlo(uploaded_file)
+
+    st.subheader("📋 Tasks")
+    st.dataframe(df, use_container_width=True)
+
+    st.subheader("📊 Gantt Chart")
+    fig = build_gantt(df)
+    st.plotly_chart(fig, use_container_width=True)
