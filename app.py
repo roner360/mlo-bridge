@@ -102,6 +102,8 @@ def normalize_dates(df):
 # BUILD TIMELINE HTML
 # =========================
 def build_html_timeline(df):
+    import json
+
     items = []
     links = []
 
@@ -113,28 +115,28 @@ def build_html_timeline(df):
             "end": row["end"].strftime("%Y-%m-%d %H:%M:%S")
         })
 
-        # dependency: figlio -> parent
         if row["parent"]:
             links.append({
                 "from": str(row["id"]),
                 "to": str(row["parent"])
             })
 
-    items_json = json.dumps(items)
-    links_json = json.dumps(links)
-
     return f"""
-    <div id="timeline" style="height:600px; position:relative;"></div>
-    <svg id="arrows" style="position:absolute; top:0; left:0; width:100%; height:600px; pointer-events:none;"></svg>
+    <div id="wrapper" style="position:relative;">
+        <div id="timeline" style="height:600px;"></div>
+        <svg id="arrows" style="position:absolute; top:0; left:0; width:100%; height:600px; pointer-events:none;"></svg>
+    </div>
 
     <script src="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.0/standalone/umd/vis-timeline-graph2d.min.js"></script>
     <link href="https://cdn.jsdelivr.net/npm/vis-timeline@7.7.0/styles/vis-timeline-graph2d.min.css" rel="stylesheet" />
 
     <script>
-        const items = new vis.DataSet({items_json});
-        const links = {links_json};
+        const items = new vis.DataSet({json.dumps(items)});
+        const links = {json.dumps(links)};
 
         const container = document.getElementById("timeline");
+        const wrapper = document.getElementById("wrapper");
+        const svg = document.getElementById("arrows");
 
         const timeline = new vis.Timeline(container, items, {{
             stack: true,
@@ -142,24 +144,29 @@ def build_html_timeline(df):
             moveable: true
         }});
 
+        function getItemEl(id) {{
+            return container.querySelector(`.vis-item[data-id="${{id}}"]`);
+        }}
+
         function drawArrows() {{
-            const svg = document.getElementById("arrows");
             svg.innerHTML = "";
 
+            const wrapperRect = wrapper.getBoundingClientRect();
+
             links.forEach(link => {{
-                const fromEl = document.querySelector(`[data-id='${{link.from}}']`);
-                const toEl = document.querySelector(`[data-id='${{link.to}}']`);
+                const fromEl = getItemEl(link.from);
+                const toEl = getItemEl(link.to);
 
                 if (!fromEl || !toEl) return;
 
                 const fromRect = fromEl.getBoundingClientRect();
                 const toRect = toEl.getBoundingClientRect();
 
-                const x1 = fromRect.right;
-                const y1 = fromRect.top + fromRect.height / 2;
+                const x1 = fromRect.right - wrapperRect.left;
+                const y1 = fromRect.top + fromRect.height / 2 - wrapperRect.top;
 
-                const x2 = toRect.left;
-                const y2 = toRect.top + toRect.height / 2;
+                const x2 = toRect.left - wrapperRect.left;
+                const y2 = toRect.top + toRect.height / 2 - wrapperRect.top;
 
                 const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
                 line.setAttribute("x1", x1);
@@ -174,11 +181,11 @@ def build_html_timeline(df):
         }}
 
         timeline.on("changed", drawArrows);
+        timeline.on("rangechanged", drawArrows);
 
-        setTimeout(drawArrows, 500);
+        setTimeout(drawArrows, 800);
     </script>
     """
-
 
 # =========================
 # UI
